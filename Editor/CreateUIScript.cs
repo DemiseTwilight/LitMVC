@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Reflection;
 using TMPro;
+using Unity.VisualScripting;
 using UnityEditor;
 using UnityEditor.Callbacks;
 using UnityEngine;
@@ -14,12 +15,24 @@ public class CreateUIScript : Editor {
     private static UIConfig _mvcUIConfig;
     private static Dictionary<string, string> _subViewDic = new Dictionary<string, string>();
 
+    private static List<Type> _recognizable = new() {
+        typeof(Button), typeof(Dropdown), typeof(Text), typeof(InputField), typeof(Toggle),
+        typeof(Slider), typeof(Scrollbar), typeof(ScrollRect),
+        typeof(TMP_InputField), typeof(TMP_Dropdown), typeof(TMP_Text),
+        typeof(Image),
+    };
+
+    private static List<Type> _recognizable2 = new() {
+        typeof(RectTransform),
+    };
     private struct ComponentData {
         public string name;
+        public string varName;
         public string type;
         public Component component;
     }
     private static Dictionary<string,ComponentData> _componentData=new Dictionary<string,ComponentData>();
+    private static  Assembly _assembly = Assembly.Load("Assembly-CSharp");
     
     [MenuItem("Assets/MVC/CreateUIView", false, 10)]
     private static void GenUIView() {
@@ -45,7 +58,7 @@ public class CreateUIScript : Editor {
         //View生成，刷新并绑定
         uiScriptsPath.Clear();
         _componentData.Clear();
-        TotalComponentList(uiPrefab);
+        TotalComponentList(uiPrefab.transform);
         var scriptName = uiPrefab.name + "View";
         StringBuilder scriptText = new StringBuilder();
         scriptText.AppendLine("using UnityEngine;");
@@ -86,75 +99,127 @@ public class CreateUIScript : Editor {
                 component = data.component }
             ).ToList()
         };
-        if (!_mvcUIConfig.UiMap.Contains(uiBindData)) {
-            _mvcUIConfig.UiMap.Add(uiBindData);
-            EditorUtility.SetDirty(_mvcUIConfig);
-        }
+        _mvcUIConfig.AddOrUpdate(uiBindData);
 
+        EditorUtility.SetDirty(_mvcUIConfig);
         AssetDatabase.SaveAssets();
         AssetDatabase.Refresh();
 
     }
 
     [DidReloadScripts(1)]
-    static void BindUI() {
+    private static void AutoBindUI() {
         if (!_mvcUIConfig) _mvcUIConfig = UIConfig.GetUIConfig();
-        var assembly = Assembly.Load("Assembly-CSharp");
-        List<int> removeList = new List<int>();
+        _mvcUIConfig.RemoveLapseData();
         var bindData=_mvcUIConfig.UiMap;
         for (int i = 0; i < bindData.Count; i++) {
-            var viewType = assembly.GetType(bindData[i].scriptName);
-            //剔除已经失效的绑定数据：
-            if (viewType == null || !bindData[i].uiPrefab) {
-                removeList.Add(i);
-                continue;
-            } 
-            if(!bindData[i].uiPrefab.TryGetComponent(viewType, out _)){
-                var script = bindData[i].uiPrefab.AddComponent(viewType);
-                //绑定组件
-                foreach (var componentMap in bindData[i].components) {
-                    var fieldInfo = viewType.GetField(componentMap.handleName);
-                    fieldInfo.SetValue(script,componentMap.component);
-                }
-                Debug.Log($"脚本{bindData[i].scriptName}绑定成功");
-            }
+            BindUI(bindData[i]);
         }
-        
-        //清理失效的绑定数据：
-        for (int i = removeList.Count-1; i >= 0; i--) {
-            Debug.Log("删除绑定记录:"+_mvcUIConfig.UiMap[i].scriptName);
-            _mvcUIConfig.UiMap.RemoveAt(removeList[i]);
-        }
-        // foreach (var removeData in removeList) {
-        //     _mvcUIConfig.UiMap.Remove(removeData);
-        // }
         EditorUtility.SetDirty(_mvcUIConfig);
         AssetDatabase.SaveAssets();
     }
-    private static void TotalComponentList(GameObject ui) {
-        foreach (Transform child in ui.GetComponentsInChildren<Transform>(true)) {
-            //筛选拥有下划线命名的组件
-            if (!child.name.Contains('_')) {
-                continue;
+    
+    [MenuItem("Assets/MVC/ManualBindUI", false, 11)]
+    private static void ManualBindUI() {
+        try {
+            AssetDatabase.StartAssetEditing();
+            GameObject uiPrefab = Selection.activeGameObject as GameObject;
+            if (!uiPrefab) return;
+            if (!_mvcUIConfig) _mvcUIConfig = UIConfig.GetUIConfig();
+            if (_mvcUIConfig.TryGetData(uiPrefab,out var viewData)) {
+                BindUI(viewData);
             }
+        }
+        catch (Exception e) {
+            Debug.LogError(e);
+            throw;
+        }
+        finally {
+            AssetDatabase.StopAssetEditing();
+            AssetDatabase.Refresh();
+        }
+    }
 
-            List<Type> recognizable = new List<Type>() {
-                typeof(Button), typeof(Dropdown),typeof(Text),typeof(InputField),typeof(Toggle),
-                typeof(Slider),typeof(Selectable), typeof(Scrollbar),typeof(ScrollRect),
-                typeof(TMP_InputField),typeof(TMP_Dropdown),typeof(TMP_Text),
-                typeof(Image),
-                typeof(RectTransform),
-            };
-            foreach (var type in recognizable) {
-                if (child.TryGetComponent(type, out var component)) {
-                    AddComponent(child,type.Name,component);
-                    break;
-                }
+    private static void BindUI(ViewData viewData) {
+        var viewType = _assembly.GetType(viewData.scriptName);
+        Component script = null;
+        if (!viewData.uiPrefab.TryGetComponent(viewType, out script)) {
+            script = viewData.uiPrefab.AddComponent(viewType);
+            Debug.Log($"脚本{viewData.scriptName}绑定成功");
+        }
+
+        //绑定组件
+        if (script != null) {
+            foreach (var componentMap in viewData.components) {
+                var fieldInfo = viewType.GetField(componentMap.handleName);
+                fieldInfo.SetValue(script, componentMap.component);
             }
         }
     }
-    private static void AddComponent(Transform child,string type,Component component) {
-        var data = new ComponentData() { name = "m_"+child.name, type = type,component = component};
+
+    private static void TotalComponentList(Transform ui) {
+        foreach (Transform child in ui.transform) {
+            Debug.Log(child.name);
+            if (PrefabUtility.IsAnyPrefabInstanceRoot(child.gameObject)) {
+                //如果子对象是预制体或预制体变体,查找注册表。如果不存在的话按照通常规则进行
+                if (_mvcUIConfig.TryGetData($"LitMVC.{child.name}View", out var viewData)) {
+                    if (child.TryGetComponent(_assembly.GetType(viewData.scriptName) , out var component)) {
+                        AddComponent($"m_{child.name}_SubView", viewData.scriptName, component);
+                    }
+                    continue;
+                }
+            }
+            if (child.name.Contains('_')) {
+                //筛选拥有下划线命名的组件,如果存在更高匹配等级将不会匹配更低等级组件
+                int recognizableLevel = 2;
+                foreach (var type in _recognizable) {
+                    if (child.TryGetComponent(type, out var component)) {
+                        AddComponent($"m_{child.name}_{type.Name}", type.Name, component);
+                        recognizableLevel = 1;
+                    }
+                }
+
+                if (recognizableLevel == 2) {
+                    recognizableLevel = 3;
+                    foreach (var type in _recognizable2) {
+                        if (child.TryGetComponent(type, out var component)) {
+                            AddComponent($"m_{child.name}", type.Name, component);
+                            recognizableLevel = 2;
+                        }
+                    }
+                }
+            }
+
+            TotalComponentList(child);
+        }
+        
+        
+        // foreach (Transform child in ui.GetComponentsInChildren<Transform>(true)) {
+        //     if (ui!=child.gameObject && PrefabUtility.IsAnyPrefabInstanceRoot(child.gameObject)) {
+        //         //如果子对象是预制体或预制体变体,查找注册表。如果不存在的话按照通常规则进行
+        //         if (_mvcUIConfig.TryGetData($"LitMVC.{child.name}View", out var viewData)) {
+        //             if (child.TryGetComponent(_assembly.GetType(viewData.scriptName) , out var component)) {
+        //                 AddComponent(child, viewData.scriptName, component);
+        //             }
+        //             continue;
+        //         }
+        //     }
+        //
+        //     var nearestRoot = PrefabUtility.GetNearestPrefabInstanceRoot(child);
+        //     var outermostRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(child);
+        //     if (nearestRoot != outermostRoot && child.name.Contains('_')) {
+        //         //筛选拥有下划线命名的组件
+        //         foreach (var type in _recognizable) {
+        //             if (child.TryGetComponent(type, out var component)) {
+        //                 AddComponent(child, type.Name, component);
+        //                 break;
+        //             }
+        //         }
+        //     }
+        // }
+    }
+    private static void AddComponent(string childName,string type,Component component) {
+        var data = new ComponentData() { name = childName, type = type,component = component};
         //不能添加说明有重复对象：
         int i = 0;
         var originalName=data.name;

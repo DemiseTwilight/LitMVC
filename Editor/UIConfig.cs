@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using LitMVC;
 using UnityEditor;
 using UnityEngine;
@@ -14,7 +15,7 @@ public class UIConfig : ScriptableObject
     [SerializeField]private string _logicPath;
     [SerializeField]private string _servicePath;
     [SerializeField]private string _modelPath;
-
+    
     [SerializeField] public List<ViewData> UiMap=new List<ViewData>();
     public string GetViewPath() {
         if (string.IsNullOrWhiteSpace(_viewPath)) {
@@ -68,9 +69,49 @@ public class UIConfig : ScriptableObject
             var fullPath = AssetDatabase.GUIDToAssetPath(guid);
             var configPath = Path.Combine(fullPath, "Editor","config.asset");
             var mvcConfig = AssetDatabase.LoadAssetAtPath<UIConfig>(configPath);
+            // mvcConfig.SynchronousDictionary();
             return mvcConfig;
         }
         return null;
+    }
+
+    public bool TryGetData(string scriptName,out ViewData data) {
+        data=UiMap.FirstOrDefault(data => data.scriptName == scriptName);
+        return data.scriptName != default;
+    }
+    public bool TryGetData(GameObject prefab,out ViewData data) {
+        data=UiMap.FirstOrDefault(data => data.uiPrefab == prefab);
+        return data.scriptName != default;
+    }
+
+    public void AddOrUpdate(ViewData data) {
+        for (int i = 0; i < UiMap.Count; i++) {
+            if (UiMap[i].scriptName == data.scriptName) {
+                UiMap[i] = data;
+                return;
+            }
+        }
+        UiMap.Add(data);
+    }
+    public void Remove(string scriptName) {
+        for (int i = 0; i < UiMap.Count; i++) {
+            if (UiMap[i].scriptName == scriptName) {
+                UiMap[i] = UiMap[^1];
+                UiMap.RemoveAt(UiMap.Count-1);
+                return;
+            }
+        }
+    }
+    /// <summary>
+    /// 清理失效的绑定数据
+    /// </summary>
+    public void RemoveLapseData() {
+        for (int i = 0; i < UiMap.Count; i++) {
+            if (!UiMap[i].uiPrefab) {
+                UiMap[i] = UiMap[^1];
+                UiMap.RemoveAt(UiMap.Count-1);
+            }
+        }
     }
 }
 [CustomEditor(typeof(UIConfig))]
